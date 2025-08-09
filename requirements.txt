@@ -1,0 +1,12 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+discord.py==2.4.0
+pydantic==2.8.2
+pydantic-settings==2.4.0
+SQLAlchemy==2.0.34
+alembic==1.13.2
+asyncpg==0.29.0
+aio-mc-rcon==3.4.1
+asyncssh==2.16.0
+python-dotenv==1.0.1
+tenacity==9.0.0
