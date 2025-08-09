@@ -12,8 +12,8 @@ class Settings(BaseSettings):
     DISCORD_COMMAND_PREFIX: str = "!"
 
     # RCON
-    MC_RCON_HOST: str
-    MC_RCON_PORT: int = 25575
+    MC_RCON_HOST: str = "s450618-zn4kp.spot.gs"
+    MC_RCON_PORT: int = 31096
     MC_RCON_PASSWORD: str
 
     # SFTP

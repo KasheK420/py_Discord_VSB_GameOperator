@@ -18,7 +18,8 @@ async def rcon_client(host: str | None = None, port: int | None = None, password
 
 async def mc_cmd(cmd: str) -> str:
     async with rcon_client() as c:
-        return await c.send(cmd)
+        # FIX: send_cmd(), not send()
+        return await c.send_cmd(cmd)
 
 async def get_status() -> dict:
     # Many Spigot/Paper servers have the `list` command; `minecraft:execute` avoided here.

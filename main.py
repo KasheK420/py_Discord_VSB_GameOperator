@@ -57,11 +57,15 @@ intents.members = True
 
 class MyBot(commands.Bot):
     async def setup_hook(self) -> None:
-        # Called after login is initialised; safe place to add cogs and start tasks
         log.info("[discord] setup_hook: loading cogs & presence")
         await self.add_cog(MinecraftCog(self))
         await self.add_cog(ModerationCog(self))
-        setup_presence_tasks(self)  # internally uses asyncio.create_task + wait_until_ready
+        try:
+            await self.tree.sync()  # or guild-scoped sync for faster propagation
+            log.info("[discord] slash commands synced")
+        except Exception:
+            log.exception("[discord] slash sync failed")
+        setup_presence_tasks(self)
 
 
 bot = MyBot(
