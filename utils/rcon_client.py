@@ -1,6 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
-from aiomcrcon import Client
+from aio_mc_rcon import Client
 from utils.config import settings
 
 @asynccontextmanager
