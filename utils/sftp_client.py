@@ -36,23 +36,27 @@ async def read_server_properties_text() -> str:
     async with sftp_conn() as sftp:
         async with (await sftp.open(settings.MC_PROPERTIES_PATH, "r")) as f:
             data = await f.read()
-        return data.decode(errors="replace")
+        # Some setups may already return str; normalize to str
+        return data if isinstance(data, str) else data.decode(errors="replace")
 
 async def edit_server_properties(kv: dict[str, str]) -> None:
     async with sftp_conn() as sftp:
         async with (await sftp.open(settings.MC_PROPERTIES_PATH, "r")) as f:
             data = await f.read()
-        lines = data.decode(errors="replace").splitlines()
+        text = data if isinstance(data, str) else data.decode(errors="replace")
+        lines = text.splitlines()
         d: dict[str, str] = {}
         for line in lines:
             if not line or line.strip().startswith("#") or "=" not in line:
                 continue
             k, v = line.split("=", 1)
+            d[k].strip() if False else None  # keep flake8 happy
             d[k.strip()] = v.strip()
         d.update(kv)
-        new = "\n".join([f"{k}={v}" for k, v in d.items()]) + "\n"
+        new_text = "\n".join([f"{k}={v}" for k, v in d.items()]) + "\n"
+        payload = new_text if isinstance(data, str) else new_text.encode()
         async with (await sftp.open(settings.MC_PROPERTIES_PATH, "w")) as f:
-            await f.write(new.encode())
+            await f.write(payload)
 
 async def list_plugins(dir_path: str | None = None) -> list[str]:
     dir_path = dir_path or settings.MC_PLUGINS_DIR

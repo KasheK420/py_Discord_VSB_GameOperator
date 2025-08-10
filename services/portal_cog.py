@@ -1,6 +1,5 @@
 # services/portal_cog.py
 from __future__ import annotations
-
 import asyncio
 import contextlib
 import logging
@@ -11,12 +10,10 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils.config import settings
-from utils.rcon_client import start_rcon_manager, get_status, mc_cmd  # uses your RconManager
-from utils.sftp_client import read_server_properties_text            # uses your SFTP helper
+from utils.rcon_client import get_status, mc_cmd
+from utils.sftp_client import read_server_properties_text
 
 log = logging.getLogger(__name__)
-
-# ------------------------- helpers & config -------------------------
 
 def _csv_ids(val: str) -> list[int]:
     return [int(x.strip()) for x in str(val or "").split(",") if x.strip().isdigit()]
@@ -40,7 +37,6 @@ def _has_any_role(member: discord.Member | discord.abc.User, role_ids: list[int]
     return any(rid in uroles for rid in role_ids)
 
 async def _ack(inter: discord.Interaction, ephemeral: bool = True):
-    """Defer quickly to avoid 3s timeout. Use followup.send afterwards."""
     if not inter.response.is_done():
         await inter.response.defer(ephemeral=ephemeral, thinking=True)
 
@@ -63,8 +59,6 @@ def _portal_embed(server_info: Optional[dict] = None, props_small: Optional[dict
     e.set_footer(text="GameOperator Portal")
     return e
 
-# ------------------------------ Modals ------------------------------
-
 class WhitelistModal(discord.ui.Modal, title="Whitelist Request"):
     ign = discord.ui.TextInput(label="Minecraft username", max_length=32)
     note = discord.ui.TextInput(label="Notes (optional)", style=discord.TextStyle.paragraph, required=False)
@@ -73,19 +67,10 @@ class WhitelistModal(discord.ui.Modal, title="Whitelist Request"):
         await _ack(interaction)
         if not _has_any_role(interaction.user, WHITELIST_ALLOWED_ROLE_IDS):
             return await interaction.followup.send("You don’t have permission to request whitelist.", ephemeral=True)
-
         player = str(self.ign).strip()
         try:
-            # Ensure RCON is running and briefly wait for readiness
-            from utils.rcon_client import start_rcon_manager, _manager  # type: ignore
-            await start_rcon_manager()
-            try:
-                await asyncio.wait_for(_manager._ready.wait(), timeout=3)  # type: ignore[attr-defined]
-            except asyncio.TimeoutError:
-                return await interaction.followup.send("❌ RCON not ready (check host/port/password & firewall).", ephemeral=True)
-
-            await asyncio.wait_for(mc_cmd(f"whitelist add {player}"), timeout=6)
-            await asyncio.wait_for(mc_cmd("whitelist reload"), timeout=6)
+            await asyncio.wait_for(mc_cmd(f"whitelist add {player}"), timeout=8)
+            await asyncio.wait_for(mc_cmd("whitelist reload"), timeout=8)
             await interaction.followup.send(f"✅ Added **{player}** to whitelist.", ephemeral=True)
         except asyncio.TimeoutError:
             await interaction.followup.send("❌ RCON timed out (check reachability).", ephemeral=True)
@@ -95,7 +80,6 @@ class WhitelistModal(discord.ui.Modal, title="Whitelist Request"):
 class SupportModal(discord.ui.Modal, title="Contact Admin"):
     subject = discord.ui.TextInput(label="Subject", max_length=80)
     details = discord.ui.TextInput(label="What do you need?", style=discord.TextStyle.paragraph, max_length=1000)
-
     async def on_submit(self, interaction: discord.Interaction):
         await _ack(interaction)
         ch = interaction.channel
@@ -116,24 +100,21 @@ class SupportModal(discord.ui.Modal, title="Contact Admin"):
         except discord.Forbidden:
             await interaction.followup.send("I need **Manage Threads** permission here.", ephemeral=True)
 
-# ------------------------------- View --------------------------------
-
 class PortalView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=None)  # persistent handlers across restarts
+        super().__init__(timeout=None)
 
     @discord.ui.button(label="Whitelist", style=discord.ButtonStyle.primary, custom_id="portal:whitelist")
     async def whitelist_btn(self, interaction: discord.Interaction, _: discord.ui.Button):
         if not _has_any_role(interaction.user, WHITELIST_ALLOWED_ROLE_IDS):
             return await interaction.response.send_message("You don’t have permission to request whitelist.", ephemeral=True)
-        # Opening a modal must be the first response (no defer)
         await interaction.response.send_modal(WhitelistModal())
 
     @discord.ui.button(label="Server Info", style=discord.ButtonStyle.secondary, custom_id="portal:status")
     async def status_btn(self, interaction: discord.Interaction, _: discord.ui.Button):
         await _ack(interaction)
         try:
-            info = await asyncio.wait_for(get_status(), timeout=6)
+            info = await asyncio.wait_for(get_status(), timeout=8)
             await interaction.followup.send(embed=_portal_embed(server_info=info), ephemeral=True)
         except asyncio.TimeoutError:
             await interaction.followup.send("Status error: timed out (RCON).", ephemeral=True)
@@ -144,8 +125,7 @@ class PortalView(discord.ui.View):
     async def props_btn(self, interaction: discord.Interaction, _: discord.ui.Button):
         await _ack(interaction)
         try:
-            text = await asyncio.wait_for(read_server_properties_text(), timeout=8)
-            # Parse a subset for readability + include snippet
+            text = await asyncio.wait_for(read_server_properties_text(), timeout=10)
             d: dict[str, str] = {}
             for line in text.splitlines():
                 if line.strip() and not line.strip().startswith("#") and "=" in line:
@@ -165,24 +145,15 @@ class PortalView(discord.ui.View):
 
     @discord.ui.button(label="Ask Admin", style=discord.ButtonStyle.success, custom_id="portal:support")
     async def support_btn(self, interaction: discord.Interaction, _: discord.ui.Button):
-        # Modal is quick; no defer needed
         await interaction.response.send_modal(SupportModal())
 
-# ------------------------------- Cog ---------------------------------
-
 class PortalCog(commands.Cog):
-    """Auto-posts an embedded portal with buttons, and provides basic diagnostics."""
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
     @commands.Cog.listener()
     async def on_ready(self):
-        # persistent button handlers
         self.bot.add_view(PortalView())
-        # ensure RCON manager is running (idempotent)
-        with contextlib.suppress(Exception):
-            await start_rcon_manager()
-        # post or update the portal message
         await self._post_or_update_portal()
 
     async def _post_or_update_portal(self):
@@ -193,9 +164,9 @@ class PortalCog(commands.Cog):
 
         info, props_small = None, None
         with contextlib.suppress(Exception):
-            info = await asyncio.wait_for(get_status(), timeout=6)
+            info = await asyncio.wait_for(get_status(), timeout=8)
         with contextlib.suppress(Exception):
-            text = await asyncio.wait_for(read_server_properties_text(), timeout=8)
+            text = await asyncio.wait_for(read_server_properties_text(), timeout=10)
             d = {}
             for line in text.splitlines():
                 if line.strip() and not line.strip().startswith("#") and "=" in line:
@@ -206,7 +177,6 @@ class PortalCog(commands.Cog):
 
         embed = _portal_embed(server_info=info, props_small=props_small)
 
-        # try to find existing portal to edit
         existing = None
         async for m in ch.history(limit=50):
             if m.author == self.bot.user and m.embeds and (m.embeds[0].footer and m.embeds[0].footer.text == "GameOperator Portal"):
@@ -223,24 +193,7 @@ class PortalCog(commands.Cog):
         except Exception:
             log.exception("[portal] Failed to post/update portal message.")
 
-    # -------- optional diag slash commands --------
-
-    @app_commands.command(name="rcon_test", description="Check RCON connectivity quickly")
-    async def rcon_test(self, interaction: discord.Interaction):
-        await _ack(interaction)
-        try:
-            from utils.rcon_client import start_rcon_manager, _manager  # type: ignore
-            await start_rcon_manager()
-            try:
-                await asyncio.wait_for(_manager._ready.wait(), timeout=3)  # type: ignore[attr-defined]
-            except asyncio.TimeoutError:
-                return await interaction.followup.send("❌ Not ready (cannot connect to RCON).", ephemeral=True)
-            out = await asyncio.wait_for(mc_cmd("list"), timeout=5)
-            await interaction.followup.send(f"✅ RCON OK.\n```{out}```", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ RCON error: `{e}`", ephemeral=True)
-
-    @app_commands.command(name="portal", description="Repost the portal here (admin only).")
+    @app_commands.command(name="portal", description="Repost the portal here")
     async def portal(self, interaction: discord.Interaction):
         await _ack(interaction)
         await self._post_or_update_portal()
@@ -248,4 +201,3 @@ class PortalCog(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(PortalCog(bot))
-
