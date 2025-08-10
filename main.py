@@ -21,6 +21,8 @@ discord.VoiceClient.warn_nacl = False
 from utils.config import settings
 from utils.logging import configure_logging
 from utils.db import async_engine, async_session_maker  # noqa: F401
+from utils.rcon_client import start_rcon_manager, stop_rcon_manager
+from services.mc_chat_bridge import setup_chat_bridge
 
 from services.minecraft_cog import MinecraftCog
 from services.moderation_cog import ModerationCog
@@ -60,6 +62,11 @@ class MyBot(commands.Bot):
         log.info("[discord] setup_hook: loading cogs & presence")
         await self.add_cog(MinecraftCog(self))
         await self.add_cog(ModerationCog(self))
+        await self.load_extension("services.portal_cog")
+
+        setup_presence_tasks(bot)
+        await start_rcon_manager()        # NEW
+        setup_chat_bridge(bot)            # NEW
         try:
             await self.tree.sync()  # or guild-scoped sync for faster propagation
             log.info("[discord] slash commands synced")

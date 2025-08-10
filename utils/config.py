@@ -10,12 +10,16 @@ class Settings(BaseSettings):
     DISCORD_ALERT_CHANNEL_ID: int
     DISCORD_VOICE_CHANNEL_ID: int
     DISCORD_COMMAND_PREFIX: str = "!"
+    DISCORD_MC_CHAT_CHANNEL_ID: int = 0  # channel to forward MC chat into
 
     # RCON
+    # Optional RCON keepalive
+    RCON_KEEPALIVE_SECONDS: int = 30
     MC_RCON_HOST: str = "s450618-zn4kp.spot.gs"
     MC_RCON_PORT: int = 31096
     MC_RCON_PASSWORD: str
     MC_SERVER_NAME: str = "VŠB Minecraft"
+    MC_LOG_PATH: str = "/path/to/server/logs/latest.log"
 
     # SFTP
     SFTP_HOST: str

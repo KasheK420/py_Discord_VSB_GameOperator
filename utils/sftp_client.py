@@ -1,4 +1,6 @@
+# utils/sftp_client.py
 import asyncssh
+import stat as pystat
 from contextlib import asynccontextmanager
 from utils.config import settings
 
@@ -19,7 +21,6 @@ async def sftp_conn():
         await conn.wait_closed()
 
 async def upload_plugin_from_url(url: str, dest_dir: str | None = None):
-    # Download inside container then upload—kept simple; you can add streaming later.
     import tempfile, os, urllib.request
     dest_dir = dest_dir or settings.MC_PLUGINS_DIR
     with tempfile.TemporaryDirectory() as td:
@@ -31,10 +32,9 @@ async def upload_plugin_from_url(url: str, dest_dir: str | None = None):
 
 async def edit_server_properties(kv: dict[str, str]) -> None:
     async with sftp_conn() as sftp:
-        # read existing
         data = await sftp.read(settings.MC_PROPERTIES_PATH)
-        lines = data.decode().splitlines()
-        d = {}
+        lines = data.decode(errors="replace").splitlines()
+        d: dict[str, str] = {}
         for line in lines:
             if not line or line.strip().startswith("#") or "=" not in line:
                 continue
@@ -43,3 +43,26 @@ async def edit_server_properties(kv: dict[str, str]) -> None:
         d.update(kv)
         new = "\n".join([f"{k}={v}" for k, v in d.items()]) + "\n"
         await sftp.write(settings.MC_PROPERTIES_PATH, new.encode())
+
+# NEW: read whole server.properties as text
+async def read_server_properties_text() -> str:
+    async with sftp_conn() as sftp:
+        data = await sftp.read(settings.MC_PROPERTIES_PATH)
+        return data.decode(errors="replace")
+
+# NEW: list plugin directory (marks folders with /)
+async def list_plugins(dir_path: str | None = None) -> list[str]:
+    dir_path = dir_path or settings.MC_PLUGINS_DIR
+    names: list[str] = []
+    async with sftp_conn() as sftp:
+        for name in await sftp.listdir(dir_path):
+            try:
+                attrs = await sftp.stat(f"{dir_path}/{name}")
+                mark_dir = pystat.S_ISDIR(attrs.permissions)
+                names.append(name + ("/" if mark_dir else ""))
+            except Exception:
+                names.append(name)
+    # Put jars first (sorted), then folders/others
+    jars = sorted([n for n in names if n.lower().endswith(".jar")])
+    rest = sorted([n for n in names if n not in jars])
+    return jars + rest
