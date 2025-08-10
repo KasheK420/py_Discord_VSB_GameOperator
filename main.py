@@ -136,12 +136,28 @@ async def debug_state():
     }
 
 
-async def _db_ping(timeout: float = 10.0):
-    async def _ping():
-        async with async_engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
-    await asyncio.wait_for(_ping(), timeout=timeout)
+async def _ping() -> None:
+    """Single DB round-trip to verify DNS, TCP, auth, and query."""
+    async with async_engine.begin() as conn:
+        await conn.execute(text("SELECT 1"))
 
+async def _db_ping(timeout: float = 10.0, attempts: int = 6) -> None:
+    """Retry DB ping with exponential backoff."""
+    delay = 1.0
+    last: Exception | None = None
+    for i in range(1, attempts + 1):
+        try:
+            await asyncio.wait_for(_ping(), timeout=timeout)
+            log.info("DB ping OK on attempt %d", i)
+            return
+        except Exception as e:
+            last = e
+            log.warning("DB ping attempt %d failed: %s; retrying in %.1fs", i, e, delay)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 8.0)
+    # If all attempts failed, raise the last error
+    assert last is not None
+    raise last
 
 @app.on_event("startup")
 async def on_startup():

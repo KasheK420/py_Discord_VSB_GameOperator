@@ -50,6 +50,7 @@ async def read_server_properties_text() -> str:
         async with (await sftp.open(settings.MC_PROPERTIES_PATH, "r")) as f:
             data = await f.read()
         return data.decode(errors="replace")
+    
 # NEW: list plugin directory (marks folders with /)
 async def list_plugins(dir_path: str | None = None) -> list[str]:
     dir_path = dir_path or settings.MC_PLUGINS_DIR
