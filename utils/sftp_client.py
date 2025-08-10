@@ -32,7 +32,8 @@ async def upload_plugin_from_url(url: str, dest_dir: str | None = None):
 
 async def edit_server_properties(kv: dict[str, str]) -> None:
     async with sftp_conn() as sftp:
-        data = await sftp.read(settings.MC_PROPERTIES_PATH)
+        async with (await sftp.open(settings.Mc_PROPERTIES_PATH, "r")) as f:  # <-- keep name exactly as in your settings
+            data = await f.read()
         lines = data.decode(errors="replace").splitlines()
         d: dict[str, str] = {}
         for line in lines:
@@ -42,7 +43,8 @@ async def edit_server_properties(kv: dict[str, str]) -> None:
             d[k.strip()] = v.strip()
         d.update(kv)
         new = "\n".join([f"{k}={v}" for k, v in d.items()]) + "\n"
-        await sftp.write(settings.MC_PROPERTIES_PATH, new.encode())
+        async with (await sftp.open(settings.MC_PROPERTIES_PATH, "w")) as f:
+            await f.write(new.encode())
 
 # NEW: read whole server.properties as text
 async def read_server_properties_text() -> str:
