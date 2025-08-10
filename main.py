@@ -1,14 +1,19 @@
+# main.py
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import logging
 import os
-
-
 import re
 import sys
 import time
+from importlib import import_module
 
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncEngine
+
 from fastapi import FastAPI
 
 import discord
@@ -21,9 +26,8 @@ discord.VoiceClient.warn_nacl = False
 from utils.config import settings
 from utils.logging import configure_logging
 from utils.db import async_engine, async_session_maker  # noqa: F401
-from utils.rcon_client import start_rcon_manager, stop_rcon_manager
-from services.mc_chat_bridge import setup_chat_bridge
 
+from services.mc_chat_bridge import setup_chat_bridge
 from services.minecraft_cog import MinecraftCog
 from services.moderation_cog import ModerationCog
 from services.presence_task import setup_presence_tasks
@@ -33,9 +37,11 @@ configure_logging(settings.LOG_LEVEL)
 log = logging.getLogger("main")
 logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
+# scrub proxy vars which sometimes cause odd DNS timeouts in containers
 for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
             "http_proxy", "https_proxy", "all_proxy", "no_proxy"):
     os.environ.pop(var, None)
+
 
 def _mask_token(tok: str | None) -> str:
     if not tok:
@@ -64,15 +70,14 @@ class MyBot(commands.Bot):
         await self.add_cog(ModerationCog(self))
         await self.load_extension("services.portal_cog")
 
-        setup_presence_tasks(bot)
-        await start_rcon_manager()        # NEW
-        setup_chat_bridge(bot)            # NEW
+        setup_presence_tasks(self)
+        setup_chat_bridge(self)
+
         try:
-            await self.tree.sync()  # or guild-scoped sync for faster propagation
+            await self.tree.sync()  # or use guild-scoped sync for faster propagation
             log.info("[discord] slash commands synced")
         except Exception:
             log.exception("[discord] slash sync failed")
-        setup_presence_tasks(self)
 
 
 bot = MyBot(
@@ -136,10 +141,13 @@ async def debug_state():
     }
 
 
+# ---------- DB utils
+
 async def _ping() -> None:
     """Single DB round-trip to verify DNS, TCP, auth, and query."""
     async with async_engine.begin() as conn:
         await conn.execute(text("SELECT 1"))
+
 
 async def _db_ping(timeout: float = 10.0, attempts: int = 6) -> None:
     """Retry DB ping with exponential backoff."""
@@ -155,9 +163,43 @@ async def _db_ping(timeout: float = 10.0, attempts: int = 6) -> None:
             log.warning("DB ping attempt %d failed: %s; retrying in %.1fs", i, e, delay)
             await asyncio.sleep(delay)
             delay = min(delay * 2, 8.0)
-    # If all attempts failed, raise the last error
     assert last is not None
     raise last
+
+
+async def _import_models() -> "Base":
+    """
+    Import Base and model modules so metadata is populated,
+    handling both 'models.*' and top-level files.
+    """
+    base_mod = None
+    try:
+        base_mod = import_module("models.base")
+    except ModuleNotFoundError:
+        base_mod = import_module("base")
+
+    # Import model modules (add more here if you add files)
+    for name in ("models.events", "models.server", "events", "server"):
+        with contextlib.suppress(ModuleNotFoundError):
+            import_module(name)
+
+    Base = getattr(base_mod, "Base")
+    return Base
+
+
+async def _create_all(engine: AsyncEngine) -> None:
+    """Create tables if they don't exist yet."""
+    Base = await _import_models()
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        log.info("DB schema ensured (create_all).")
+    except SQLAlchemyError:
+        log.exception("DB create_all failed.")
+        raise
+
+
+# ---------- lifecycle
 
 @app.on_event("startup")
 async def on_startup():
@@ -171,25 +213,30 @@ async def on_startup():
     token = getattr(settings, "DISCORD_TOKEN", None) or os.environ.get("DISCORD_TOKEN")
     log.info("Discord token present=%s (%s)", bool(token), _mask_token(token))
 
-    # 1) DB ping
+    # 1) DB ping + create tables
     try:
         t = time.perf_counter()
-        log.info("[1/2] DB ping…")
+        log.info("[1/3] DB ping…")
         await _db_ping(timeout=10.0)
-        log.info("[1/2] DB ping OK in %.2fs", time.perf_counter() - t)
+        log.info("[1/3] DB ping OK in %.2fs", time.perf_counter() - t)
+
+        t = time.perf_counter()
+        log.info("[2/3] Ensuring DB schema (create_all)…")
+        await _create_all(async_engine)
+        log.info("[2/3] DB schema OK in %.2fs", time.perf_counter() - t)
     except Exception as e:
-        log.exception("[1/2] DB ping FAILED: %s", e)
+        log.exception("DB init failed (continuing so Discord can still run): %s", e)
 
     # 2) Start Discord (non-blocking) + watchdog
     if not token:
-        log.error("[2/2] DISCORD_TOKEN not set; skip bot start.")
+        log.error("[3/3] DISCORD_TOKEN not set; skip bot start.")
     else:
         if getattr(app.state, "bot_task", None) is None:
-            log.info("[2/2] Starting Discord client task…")
+            log.info("[3/3] Starting Discord client task…")
             app.state.bot_task = asyncio.create_task(_start_bot(token))
             asyncio.create_task(_discord_login_watchdog(20.0))
         else:
-            log.info("[2/2] Discord task already present; skip start.")
+            log.info("[3/3] Discord task already present; skip start.")
 
     app.state.started = True
     log.info("Startup complete in %.2fs", time.perf_counter() - t0)
