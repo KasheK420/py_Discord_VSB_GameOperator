@@ -47,9 +47,9 @@ async def edit_server_properties(kv: dict[str, str]) -> None:
 # NEW: read whole server.properties as text
 async def read_server_properties_text() -> str:
     async with sftp_conn() as sftp:
-        data = await sftp.read(settings.MC_PROPERTIES_PATH)
+        async with (await sftp.open(settings.MC_PROPERTIES_PATH, "r")) as f:
+            data = await f.read()
         return data.decode(errors="replace")
-
 # NEW: list plugin directory (marks folders with /)
 async def list_plugins(dir_path: str | None = None) -> list[str]:
     dir_path = dir_path or settings.MC_PLUGINS_DIR
