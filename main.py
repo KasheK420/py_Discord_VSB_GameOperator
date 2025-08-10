@@ -69,6 +69,8 @@ class MyBot(commands.Bot):
         await self.add_cog(MinecraftCog(self))
         await self.add_cog(ModerationCog(self))
         await self.load_extension("services.portal_cog")
+        await self.load_extension("services.help_cog")
+
 
         setup_presence_tasks(self)
         setup_chat_bridge(self)
