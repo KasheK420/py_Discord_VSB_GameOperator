@@ -10,7 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils.config import settings
-from utils.rcon_client import get_status, mc_cmd
+from utils.rcon_client import get_rcon_env, get_rcon_from_properties, _tcp_probe, mc_cmd
 from utils.sftp_client import read_server_properties_text
 
 log = logging.getLogger(__name__)
@@ -198,6 +198,54 @@ class PortalCog(commands.Cog):
         await _ack(interaction)
         await self._post_or_update_portal()
         await interaction.followup.send("Portal posted/updated.", ephemeral=True)
+        
+    @app_commands.command(name="rcon_diag", description="Diagnose RCON (env vs server.properties, TCP, auth)")
+    async def rcon_diag(self, interaction: discord.Interaction):
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True, thinking=True)
+
+        env = get_rcon_env()
+        try:
+            props = await asyncio.wait_for(get_rcon_from_properties(), timeout=10)
+        except Exception as e:
+            props = {"error": str(e)}
+
+        lines = [
+            "### RCON config",
+            f"- ENV host: `{env['host']}`",
+            f"- ENV port: `{env['port']}`",
+            f"- ENV password: `{env['password_masked']}`",
+        ]
+        if "error" in props:
+            lines.append(f"- PROPS error: `{props['error']}`")
+        else:
+            lines += [
+                f"- PROPS enable-rcon: `{props.get('enable_rcon')}`",
+                f"- PROPS rcon.port: `{props.get('rcon_port')}`",
+                f"- PROPS rcon.password set: `{props.get('rcon_password_set')}`",
+            ]
+            if props.get("rcon_port") and props["rcon_port"] != env["port"]:
+                lines.append("⚠️ **Mismatch:** ENV port != server.properties rcon.port")
+
+        # TCP probe
+        tcp_ok = False
+        try:
+            await asyncio.wait_for(_tcp_probe(env["host"], env["port"], timeout=5), timeout=6)
+            lines.append("✅ TCP: able to connect")
+            tcp_ok = True
+        except Exception as e:
+            lines.append(f"❌ TCP: {e}")
+
+        # RCON auth & command (only if TCP OK)
+        if tcp_ok:
+            try:
+                out = await asyncio.wait_for(mc_cmd("list"), timeout=8)
+                preview = out if len(out) < 300 else out[:300] + "…"
+                lines.append(f"✅ RCON command OK:\n```\n{preview}\n```")
+            except Exception as e:
+                lines.append(f"❌ RCON command failed: `{e}`")
+
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(PortalCog(bot))
