@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     MC_RCON_HOST: str = "s450618-zn4kp.spot.gs"
     MC_RCON_PORT: int = 31096
     MC_RCON_PASSWORD: str
+    MC_SERVER_NAME: str = "VŠB Minecraft"
 
     # SFTP
     SFTP_HOST: str
@@ -24,6 +25,7 @@ class Settings(BaseSettings):
     MC_SERVER_DIR: str
     MC_PROPERTIES_PATH: str
     MC_PLUGINS_DIR: str
+    
 
     # DB
     DB_HOST: str = "db"

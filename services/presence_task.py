@@ -1,33 +1,39 @@
+# services/presence_task.py
 import asyncio
 import discord
-import logging
-
 from utils.config import settings
 from utils.rcon_client import get_status
 
-log = logging.getLogger(__name__)
-
 def setup_presence_tasks(bot):
-    # prevent duplicates
-    if getattr(bot, "_presence_started", False):
-        log.info("presence task already started; skipping")
-        return
-
     async def updater():
-        try:
-            # make sure gateway is ready
-            await bot.wait_until_ready()
-            log.info("presence updater started")
-            while not bot.is_closed():
-                # TODO: your presence logic here, e.g.:
-                # await bot.change_presence(activity=discord.Game(name="VŠB GameOperator"))
-                await asyncio.sleep(300)  # every 5 min
-        except asyncio.CancelledError:
-            log.info("presence updater cancelled")
-        except Exception:
-            log.exception("presence updater crashed")
+        await bot.wait_until_ready()
+        vc_id = settings.DISCORD_VOICE_CHANNEL_ID
+        server_name = settings.MC_SERVER_NAME  # <— new
 
-    # discord.py 2.x: no bot.loop — use the running loop
-    asyncio.create_task(updater())
-    bot._presence_started = True
-    log.info("queued presence updater task")
+        while not bot.is_closed():
+            try:
+                status = await get_status()  # {"online": int, "max": int, ...}
+                # Desired format: "<server name> X/X"
+                target_name = f"{server_name} {status['online']}/{status['max']}"
+
+                vc = bot.get_channel(vc_id)
+                if isinstance(vc, discord.VoiceChannel):
+                    # Discord channel names have a 100-char limit; be safe:
+                    safe_name = target_name[:100]
+                    if vc.name != safe_name:
+                        await vc.edit(name=safe_name)
+
+                # Optional: also set bot presence to show just X players
+                act = discord.Activity(
+                    type=discord.ActivityType.watching,
+                    name=f"{status['online']} players"
+                )
+                await bot.change_presence(activity=act)
+
+            except Exception:
+                # swallow errors; next tick will retry
+                pass
+
+            await asyncio.sleep(settings.POLL_INTERVAL_SECONDS)
+
+    bot.loop.create_task(updater())
