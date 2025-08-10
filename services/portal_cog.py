@@ -15,7 +15,7 @@ from utils.sftp_client import read_server_properties_text, list_plugins
 
 log = logging.getLogger(__name__)
 
-# ---- static server manual (as requested) ----
+# ---- static server manual ----
 ICON_URL = "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcStUAvKkP38bvaD2f4clomJAyu2detk5pfk5A&s"
 SRV_NAME = "VSB - Minecraft Classic"
 SRV_DNS  = "mc.vsb-discord.cz"
@@ -27,10 +27,11 @@ def _csv_ids(val: str) -> list[int]:
 
 PORTAL_CHANNEL_ID = int(getattr(settings, "PORTAL_CHANNEL_ID", 1404017766922715226))
 WHITELIST_ALLOWED_ROLE_IDS = _csv_ids(getattr(settings, "DISCORD_WHITELIST_ALLOWED_ROLE_IDS", ""))
-ADMIN_ROLE_IDS = (
-    _csv_ids(getattr(settings, "DISCORD_ADMIN_ROLE_IDS", "")) +
-    _csv_ids(getattr(settings, "DISCORD_MOD_ROLE_IDS", ""))
-)
+ADMIN_ROLE_IDS = _csv_ids(getattr(settings, "DISCORD_ADMIN_ROLE_IDS", "")) + _csv_ids(getattr(settings, "DISCORD_MOD_ROLE_IDS", ""))
+
+# Auto-refresh & voice status channel
+PORTAL_REFRESH_SECONDS = int(getattr(settings, "PORTAL_REFRESH_SECONDS", 60))
+MC_STATUS_VOICE_CHANNEL_ID = int(getattr(settings, "MC_STATUS_VOICE_CHANNEL_ID", "0") or 0)
 
 def _admin_mentions() -> str:
     return " ".join(f"<@&{rid}>" for rid in ADMIN_ROLE_IDS) or "@here"
@@ -56,16 +57,21 @@ def _portal_embed(server_info: Optional[dict] = None, props_small: Optional[dict
     e.set_thumbnail(url=ICON_URL)
 
     # Manual connection info
-    conn_lines = [f"**Name:** {SRV_NAME}",
-                  f"**DNS:** `{SRV_DNS}`",
-                  f"**IP:** `{SRV_IP}`",
-                  f"**Port:** `{SRV_PORT}`",
-                  f"**Quick:** `{SRV_DNS}:{SRV_PORT}`"]
+    conn_lines = [
+        f"**Name:** {SRV_NAME}",
+        f"**DNS:** `{SRV_DNS}`",
+        f"**IP:** `{SRV_IP}`",
+        f"**Port:** `{SRV_PORT}`",
+        f"**Quick:** `{SRV_DNS}:{SRV_PORT}`",
+    ]
     e.add_field(name="Connection", value="\n".join(conn_lines), inline=False)
 
     if server_info:
-        players = ", ".join(server_info.get("players") or []) or "—"
-        e.add_field(name="Online", value=f"{server_info.get('online','?')}/{server_info.get('max','?')}", inline=True)
+        online = server_info.get("online", "?")
+        maxp   = server_info.get("max", "?")
+        players_list = server_info.get("players") or []
+        players = ", ".join(players_list) if players_list else "—"
+        e.add_field(name="Online", value=f"{online}/{maxp}", inline=True)
         e.add_field(name="Players", value=players, inline=True)
         if "error" in server_info:
             e.add_field(name="Status Error", value=f"`{server_info['error']}`", inline=False)
@@ -101,6 +107,7 @@ class WhitelistModal(discord.ui.Modal, title="Whitelist Request"):
 class SupportModal(discord.ui.Modal, title="Contact Admin"):
     subject = discord.ui.TextInput(label="Subject", max_length=80)
     details = discord.ui.TextInput(label="What do you need?", style=discord.TextStyle.paragraph, max_length=1000)
+
     async def on_submit(self, interaction: discord.Interaction):
         await _ack(interaction)
         ch = interaction.channel
@@ -170,7 +177,6 @@ class PortalView(discord.ui.View):
 
     @discord.ui.button(label="Copy Connect", style=discord.ButtonStyle.secondary, custom_id="portal:copyconnect")
     async def copy_btn(self, interaction: discord.Interaction, _: discord.ui.Button):
-        # Discord can't copy to clipboard directly; send an ephemeral message easy to copy.
         await _ack(interaction)
         txt = f"{SRV_DNS}:{SRV_PORT}\n{SRV_IP}:{SRV_PORT}"
         await interaction.followup.send(
@@ -183,12 +189,9 @@ class PortalView(discord.ui.View):
         await _ack(interaction)
         try:
             names = await asyncio.wait_for(list_plugins(), timeout=12)
-            # Keep only directories (list_plugins marks dirs with trailing '/')
             folders = [n[:-1] for n in names if n.endswith("/")]
             if not folders:
                 return await interaction.followup.send("No plugin folders found in `MC_PLUGINS_DIR`.", ephemeral=True)
-
-            # Nicely formatted, cap long lists
             shown = folders[:50]
             more = len(folders) - len(shown)
             block = "\n".join(shown)
@@ -208,53 +211,98 @@ class PortalView(discord.ui.View):
 class PortalCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._portal_message_id: int | None = None
+        self._props_small_cache: dict[str, str] | None = None
+        self._auto_task: asyncio.Task | None = None
+        self._last_voice_name: str | None = None
 
     @commands.Cog.listener()
     async def on_ready(self):
         self.bot.add_view(PortalView())
+        await self._ensure_properties_cache()
         await self._post_or_update_portal()
+        if not self._auto_task or self._auto_task.done():
+            self._auto_task = asyncio.create_task(self._auto_refresh_loop())
 
-    async def _post_or_update_portal(self):
-        ch = self.bot.get_channel(PORTAL_CHANNEL_ID)
-        if not isinstance(ch, discord.TextChannel):
-            log.error("[portal] Channel %s not found or wrong type.", PORTAL_CHANNEL_ID)
-            return
-
-        info, props_small = None, None
-        with contextlib.suppress(Exception):
-            info = await asyncio.wait_for(get_status(), timeout=8)
+    async def _ensure_properties_cache(self):
         with contextlib.suppress(Exception):
             text = await asyncio.wait_for(read_server_properties_text(), timeout=10)
-            d = {}
+            d: dict[str, str] = {}
             for line in text.splitlines():
                 if line.strip() and not line.strip().startswith("#") and "=" in line:
                     k, v = line.split("=", 1)
                     d[k.strip()] = v.strip()
-            keys = ("motd", "difficulty", "max-players", "server-port")
-            props_small = {k: d[k] for k in keys if k in d}
+            keys = ("motd", "difficulty", "max-players", "online-mode", "server-port", "pvp", "view-distance")
+            self._props_small_cache = {k: d[k] for k in keys if k in d}
 
-        embed = _portal_embed(server_info=info, props_small=props_small)
-
-        # try to find existing portal to edit
+    async def _get_or_find_portal_message(self, ch: discord.TextChannel) -> discord.Message | None:
+        if self._portal_message_id:
+            with contextlib.suppress(Exception):
+                return await ch.fetch_message(self._portal_message_id)
         existing = None
         async for m in ch.history(limit=50):
             if m.author == self.bot.user and m.embeds and (m.embeds[0].footer and m.embeds[0].footer.text == "GameOperator Portal"):
                 existing = m
                 break
+        if existing:
+            self._portal_message_id = existing.id
+        return existing
 
+    async def _post_or_update_portal(self, live_info: Optional[dict] = None):
+        ch = self.bot.get_channel(PORTAL_CHANNEL_ID)
+        if not isinstance(ch, discord.TextChannel):
+            log.error("[portal] Channel %s not found or wrong type.", PORTAL_CHANNEL_ID)
+            return
+
+        info = live_info
+        if info is None:
+            with contextlib.suppress(Exception):
+                info = await asyncio.wait_for(get_status(), timeout=8)
+
+        embed = _portal_embed(server_info=info, props_small=self._props_small_cache)
+
+        msg = await self._get_or_find_portal_message(ch)
         try:
-            if existing:
-                await existing.edit(embed=embed, view=PortalView())
-                log.info("[portal] Updated portal message: %s", existing.id)
+            if msg:
+                await msg.edit(embed=embed, view=PortalView())
+                log.debug("[portal] Updated portal message: %s", msg.id)
             else:
-                msg = await ch.send(embed=embed, view=PortalView())
-                log.info("[portal] Posted portal message: %s", msg.id)
+                sent = await ch.send(embed=embed, view=PortalView())
+                self._portal_message_id = sent.id
+                log.info("[portal] Posted portal message: %s", sent.id)
         except Exception:
             log.exception("[portal] Failed to post/update portal message.")
+
+    async def _auto_refresh_loop(self):
+        await self.bot.wait_until_ready()
+        while not self.bot.is_closed():
+            try:
+                info = None
+                with contextlib.suppress(Exception):
+                    info = await asyncio.wait_for(get_status(), timeout=8)
+
+                # Update portal embed with fresh player list
+                await self._post_or_update_portal(live_info=info)
+
+                # Optionally rename a voice channel with online count
+                if MC_STATUS_VOICE_CHANNEL_ID and info:
+                    ch = self.bot.get_channel(MC_STATUS_VOICE_CHANNEL_ID)
+                    if isinstance(ch, discord.VoiceChannel):
+                        new_name = f"MC Online: {info.get('online','?')}/{info.get('max','?')}"
+                        if new_name != self._last_voice_name:
+                            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                                await ch.edit(name=new_name, reason="Auto status update")
+                                self._last_voice_name = new_name
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log.debug("[portal] auto refresh error: %s", e)
+            await asyncio.sleep(max(15, PORTAL_REFRESH_SECONDS))
 
     @app_commands.command(name="portal", description="Repost the portal here")
     async def portal(self, interaction: discord.Interaction):
         await _ack(interaction)
+        await self._ensure_properties_cache()
         await self._post_or_update_portal()
         await interaction.followup.send("Portal posted/updated.", ephemeral=True)
 

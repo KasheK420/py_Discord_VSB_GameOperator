@@ -7,7 +7,7 @@ from typing import Optional
 
 import discord
 from utils.config import settings
-from utils.sftp_client import sftp_conn  # SFTP-only; no exec/shell
+from utils.sftp_client import sftp_conn
 
 log = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ def setup_chat_bridge(bot: discord.Client):
                         continue
 
                     async with f:
-                        # start from EOF to avoid dumping history
+                        # start from EOF so we don't spam old history
                         if offset == 0:
                             sz = await _remote_size(path)
                             offset = int(sz or 0)
@@ -75,8 +75,12 @@ def setup_chat_bridge(bot: discord.Client):
                                 await asyncio.sleep(poll)
                                 continue
 
-                            text = chunk.decode(errors="replace")
-                            offset += len(chunk)
+                            # normalize to str
+                            if isinstance(chunk, bytes):
+                                text = chunk.decode("utf-8", errors="replace")
+                            else:
+                                text = chunk  # already str
+                            offset += len(chunk if isinstance(chunk, (bytes, bytearray)) else text.encode("utf-8", errors="ignore"))
 
                             buf += text
                             *lines, buf = buf.split("\n")
@@ -87,7 +91,8 @@ def setup_chat_bridge(bot: discord.Client):
                             if not isinstance(ch, (discord.TextChannel, discord.Thread)):
                                 continue
 
-                            for line in lines[-50:]:  # throttle burst
+                            # parse & send
+                            for line in lines[-50:]:
                                 m = None
                                 for rx in CHAT_REGEXES:
                                     m = rx.search(line)
