@@ -10,7 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils.config import settings
-from utils.rcon_client import get_rcon_env, get_rcon_from_properties, _tcp_probe, mc_cmd
+from utils.rcon_client import get_rcon_env, get_rcon_from_properties, _tcp_probe, mc_cmd, get_status
 from utils.sftp_client import read_server_properties_text
 
 log = logging.getLogger(__name__)
@@ -116,10 +116,9 @@ class PortalView(discord.ui.View):
         try:
             info = await asyncio.wait_for(get_status(), timeout=8)
             await interaction.followup.send(embed=_portal_embed(server_info=info), ephemeral=True)
-        except asyncio.TimeoutError:
-            await interaction.followup.send("Status error: timed out (RCON).", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"Status error: `{e}`", ephemeral=True)
+
 
     @discord.ui.button(label="Server Properties", style=discord.ButtonStyle.secondary, custom_id="portal:props")
     async def props_btn(self, interaction: discord.Interaction, _: discord.ui.Button):
