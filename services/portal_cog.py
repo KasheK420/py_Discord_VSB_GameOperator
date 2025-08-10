@@ -10,10 +10,17 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils.config import settings
-from utils.rcon_client import get_rcon_env, get_rcon_from_properties, _tcp_probe, mc_cmd, get_status
-from utils.sftp_client import read_server_properties_text
+from utils.rcon_client import get_status, mc_cmd
+from utils.sftp_client import read_server_properties_text, list_plugins
 
 log = logging.getLogger(__name__)
+
+# ---- static server manual (as requested) ----
+ICON_URL = "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcStUAvKkP38bvaD2f4clomJAyu2detk5pfk5A&s"
+SRV_NAME = "VSB - Minecraft Classic"
+SRV_DNS  = "mc.vsb-discord.cz"
+SRV_IP   = "167.235.90.82"
+SRV_PORT = 31095
 
 def _csv_ids(val: str) -> list[int]:
     return [int(x.strip()) for x in str(val or "").split(",") if x.strip().isdigit()]
@@ -46,18 +53,32 @@ def _portal_embed(server_info: Optional[dict] = None, props_small: Optional[dict
         description="Use the buttons below.",
         color=0x5865F2,
     )
+    e.set_thumbnail(url=ICON_URL)
+
+    # Manual connection info
+    conn_lines = [f"**Name:** {SRV_NAME}",
+                  f"**DNS:** `{SRV_DNS}`",
+                  f"**IP:** `{SRV_IP}`",
+                  f"**Port:** `{SRV_PORT}`",
+                  f"**Quick:** `{SRV_DNS}:{SRV_PORT}`"]
+    e.add_field(name="Connection", value="\n".join(conn_lines), inline=False)
+
     if server_info:
         players = ", ".join(server_info.get("players") or []) or "—"
         e.add_field(name="Online", value=f"{server_info.get('online','?')}/{server_info.get('max','?')}", inline=True)
         e.add_field(name="Players", value=players, inline=True)
         if "error" in server_info:
             e.add_field(name="Status Error", value=f"`{server_info['error']}`", inline=False)
+
     if props_small:
         pretty = "\n".join(f"**{k}**: {v}" for k, v in props_small.items())
         if pretty:
             e.add_field(name="Properties (key fields)", value=pretty, inline=False)
+
     e.set_footer(text="GameOperator Portal")
     return e
+
+# ------------------------------ Modals ------------------------------
 
 class WhitelistModal(discord.ui.Modal, title="Whitelist Request"):
     ign = discord.ui.TextInput(label="Minecraft username", max_length=32)
@@ -100,6 +121,8 @@ class SupportModal(discord.ui.Modal, title="Contact Admin"):
         except discord.Forbidden:
             await interaction.followup.send("I need **Manage Threads** permission here.", ephemeral=True)
 
+# ------------------------------- View --------------------------------
+
 class PortalView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -118,7 +141,6 @@ class PortalView(discord.ui.View):
             await interaction.followup.send(embed=_portal_embed(server_info=info), ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"Status error: `{e}`", ephemeral=True)
-
 
     @discord.ui.button(label="Server Properties", style=discord.ButtonStyle.secondary, custom_id="portal:props")
     async def props_btn(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -145,6 +167,43 @@ class PortalView(discord.ui.View):
     @discord.ui.button(label="Ask Admin", style=discord.ButtonStyle.success, custom_id="portal:support")
     async def support_btn(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.send_modal(SupportModal())
+
+    @discord.ui.button(label="Copy Connect", style=discord.ButtonStyle.secondary, custom_id="portal:copyconnect")
+    async def copy_btn(self, interaction: discord.Interaction, _: discord.ui.Button):
+        # Discord can't copy to clipboard directly; send an ephemeral message easy to copy.
+        await _ack(interaction)
+        txt = f"{SRV_DNS}:{SRV_PORT}\n{SRV_IP}:{SRV_PORT}"
+        await interaction.followup.send(
+            f"Copy one of these and paste into Minecraft:\n```text\n{txt}\n```",
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Plugins", style=discord.ButtonStyle.secondary, custom_id="portal:plugins")
+    async def plugins_btn(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await _ack(interaction)
+        try:
+            names = await asyncio.wait_for(list_plugins(), timeout=12)
+            # Keep only directories (list_plugins marks dirs with trailing '/')
+            folders = [n[:-1] for n in names if n.endswith("/")]
+            if not folders:
+                return await interaction.followup.send("No plugin folders found in `MC_PLUGINS_DIR`.", ephemeral=True)
+
+            # Nicely formatted, cap long lists
+            shown = folders[:50]
+            more = len(folders) - len(shown)
+            block = "\n".join(shown)
+            desc = f"Found **{len(folders)}** plugin folder(s):\n```text\n{block}\n```"
+            if more > 0:
+                desc += f"\n… and **{more} more**"
+            e = discord.Embed(title="📦 Plugins (folders)", description=desc, color=0x2b88d8)
+            e.set_footer(text="From MC_PLUGINS_DIR via SFTP")
+            await interaction.followup.send(embed=e, ephemeral=True)
+        except asyncio.TimeoutError:
+            await interaction.followup.send("SFTP error: timed out while listing plugins.", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"SFTP error while listing plugins: `{e}`", ephemeral=True)
+
+# ------------------------------- Cog ---------------------------------
 
 class PortalCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -176,6 +235,7 @@ class PortalCog(commands.Cog):
 
         embed = _portal_embed(server_info=info, props_small=props_small)
 
+        # try to find existing portal to edit
         existing = None
         async for m in ch.history(limit=50):
             if m.author == self.bot.user and m.embeds and (m.embeds[0].footer and m.embeds[0].footer.text == "GameOperator Portal"):
@@ -197,54 +257,6 @@ class PortalCog(commands.Cog):
         await _ack(interaction)
         await self._post_or_update_portal()
         await interaction.followup.send("Portal posted/updated.", ephemeral=True)
-        
-    @app_commands.command(name="rcon_diag", description="Diagnose RCON (env vs server.properties, TCP, auth)")
-    async def rcon_diag(self, interaction: discord.Interaction):
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True, thinking=True)
-
-        env = get_rcon_env()
-        try:
-            props = await asyncio.wait_for(get_rcon_from_properties(), timeout=10)
-        except Exception as e:
-            props = {"error": str(e)}
-
-        lines = [
-            "### RCON config",
-            f"- ENV host: `{env['host']}`",
-            f"- ENV port: `{env['port']}`",
-            f"- ENV password: `{env['password_masked']}`",
-        ]
-        if "error" in props:
-            lines.append(f"- PROPS error: `{props['error']}`")
-        else:
-            lines += [
-                f"- PROPS enable-rcon: `{props.get('enable_rcon')}`",
-                f"- PROPS rcon.port: `{props.get('rcon_port')}`",
-                f"- PROPS rcon.password set: `{props.get('rcon_password_set')}`",
-            ]
-            if props.get("rcon_port") and props["rcon_port"] != env["port"]:
-                lines.append("⚠️ **Mismatch:** ENV port != server.properties rcon.port")
-
-        # TCP probe
-        tcp_ok = False
-        try:
-            await asyncio.wait_for(_tcp_probe(env["host"], env["port"], timeout=5), timeout=6)
-            lines.append("✅ TCP: able to connect")
-            tcp_ok = True
-        except Exception as e:
-            lines.append(f"❌ TCP: {e}")
-
-        # RCON auth & command (only if TCP OK)
-        if tcp_ok:
-            try:
-                out = await asyncio.wait_for(mc_cmd("list"), timeout=8)
-                preview = out if len(out) < 300 else out[:300] + "…"
-                lines.append(f"✅ RCON command OK:\n```\n{preview}\n```")
-            except Exception as e:
-                lines.append(f"❌ RCON command failed: `{e}`")
-
-        await interaction.followup.send("\n".join(lines), ephemeral=True)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(PortalCog(bot))
