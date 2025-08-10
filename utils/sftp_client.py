@@ -12,6 +12,8 @@ async def sftp_conn():
         username=settings.SFTP_USERNAME,
         password=settings.SFTP_PASSWORD,
         known_hosts=None,
+        keepalive_interval=30,
+        keepalive_count_max=3,
     )
     try:
         sftp = await conn.start_sftp_client()
@@ -30,9 +32,15 @@ async def upload_plugin_from_url(url: str, dest_dir: str | None = None):
             await sftp.put(local, f"{dest_dir}/{local.split('/')[-1]}")
     return True
 
+async def read_server_properties_text() -> str:
+    async with sftp_conn() as sftp:
+        async with (await sftp.open(settings.MC_PROPERTIES_PATH, "r")) as f:
+            data = await f.read()
+        return data.decode(errors="replace")
+
 async def edit_server_properties(kv: dict[str, str]) -> None:
     async with sftp_conn() as sftp:
-        async with (await sftp.open(settings.Mc_PROPERTIES_PATH, "r")) as f:  # <-- keep name exactly as in your settings
+        async with (await sftp.open(settings.MC_PROPERTIES_PATH, "r")) as f:
             data = await f.read()
         lines = data.decode(errors="replace").splitlines()
         d: dict[str, str] = {}
@@ -46,14 +54,6 @@ async def edit_server_properties(kv: dict[str, str]) -> None:
         async with (await sftp.open(settings.MC_PROPERTIES_PATH, "w")) as f:
             await f.write(new.encode())
 
-# NEW: read whole server.properties as text
-async def read_server_properties_text() -> str:
-    async with sftp_conn() as sftp:
-        async with (await sftp.open(settings.MC_PROPERTIES_PATH, "r")) as f:
-            data = await f.read()
-        return data.decode(errors="replace")
-    
-# NEW: list plugin directory (marks folders with /)
 async def list_plugins(dir_path: str | None = None) -> list[str]:
     dir_path = dir_path or settings.MC_PLUGINS_DIR
     names: list[str] = []
@@ -65,7 +65,6 @@ async def list_plugins(dir_path: str | None = None) -> list[str]:
                 names.append(name + ("/" if mark_dir else ""))
             except Exception:
                 names.append(name)
-    # Put jars first (sorted), then folders/others
     jars = sorted([n for n in names if n.lower().endswith(".jar")])
     rest = sorted([n for n in names if n not in jars])
     return jars + rest

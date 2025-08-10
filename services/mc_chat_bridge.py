@@ -1,13 +1,13 @@
 # services/mc_chat_bridge.py
 from __future__ import annotations
-import re
 import asyncio
 import logging
+import re
 from typing import Optional
 
 import discord
 from utils.config import settings
-from utils.sftp_client import sftp_conn  # reuse your SFTP helper
+from utils.sftp_client import sftp_conn  # SFTP-only; no exec/shell
 
 log = logging.getLogger(__name__)
 
@@ -23,8 +23,7 @@ def _resolve_log_path() -> str:
     base = (getattr(settings, "MC_SERVER_DIR", "") or "").rstrip("/")
     return f"{base}/logs/latest.log" if base else "logs/latest.log"
 
-async def _stat_safe(path: str) -> Optional[int]:
-    """Return remote file size or None."""
+async def _remote_size(path: str) -> Optional[int]:
     try:
         async with sftp_conn() as sftp:
             st = await sftp.stat(path)
@@ -43,48 +42,36 @@ def setup_chat_bridge(bot: discord.Client):
         path = _resolve_log_path()
         log.info("[chat_bridge] Using log path: %s", path)
 
-        # tail state
         offset = 0
-        buf = ""  # for partial lines
-        poll = max(0.8, getattr(settings, "POLL_INTERVAL_SECONDS", 1))
+        buf = ""
+        poll = max(1.0, getattr(settings, "POLL_INTERVAL_SECONDS", 15))
 
         while not bot.is_closed():
             try:
                 async with sftp_conn() as sftp:
-                    # Try opening; if it fails, wait and retry
                     try:
                         f = await sftp.open(path, "r")
                     except Exception as e:
-                        log.warning("[chat_bridge] open failed (%s). Retrying…", e)
+                        log.warning("[chat_bridge] open(%s) failed: %s — retrying…", path, e)
                         await asyncio.sleep(2.0)
                         continue
 
                     async with f:
-                        # Initialize offset to EOF on first run to avoid dumping old history
+                        # start from EOF to avoid dumping history
                         if offset == 0:
-                            try:
-                                st = await sftp.stat(path)
-                                offset = int(getattr(st, "size", 0))
-                            except Exception:
-                                offset = 0
+                            sz = await _remote_size(path)
+                            offset = int(sz or 0)
+                            await f.seek(offset)
 
-                        await f.seek(offset)
                         while not bot.is_closed():
                             chunk = await f.read(64 * 1024)
                             if not chunk:
-                                # No new data — check for rotation (size shrank)
-                                try:
-                                    st = await sftp.stat(path)
-                                    size_now = int(getattr(st, "size", 0))
-                                except Exception:
-                                    size_now = None
-
-                                if size_now is not None and size_now < offset:
-                                    # rotated/truncated
+                                # rotation/truncation check
+                                sz = await _remote_size(path)
+                                if sz is not None and sz < offset:
                                     log.info("[chat_bridge] log rotated/truncated; resetting offset")
                                     offset = 0
                                     await f.seek(0)
-
                                 await asyncio.sleep(poll)
                                 continue
 
@@ -93,20 +80,28 @@ def setup_chat_bridge(bot: discord.Client):
 
                             buf += text
                             *lines, buf = buf.split("\n")
-                            if lines:
-                                ch = bot.get_channel(chan_id)
-                                if isinstance(ch, (discord.TextChannel, discord.Thread)):
-                                    for line in lines[-50:]:  # avoid bursts
-                                        m = None
-                                        for rx in CHAT_REGEXES:
-                                            m = rx.search(line)
-                                            if m: break
-                                        if m:
-                                            name = m.group("name"); msg = m.group("msg")
-                                            try:
-                                                await ch.send(f"**{name}**: {msg}")
-                                            except Exception as e:
-                                                log.warning("[chat_bridge] Discord send failed: %s", e)
+                            if not lines:
+                                continue
+
+                            ch = bot.get_channel(chan_id)
+                            if not isinstance(ch, (discord.TextChannel, discord.Thread)):
+                                continue
+
+                            for line in lines[-50:]:  # throttle burst
+                                m = None
+                                for rx in CHAT_REGEXES:
+                                    m = rx.search(line)
+                                    if m:
+                                        break
+                                if not m:
+                                    continue
+                                name = m.group("name")
+                                msg = m.group("msg")
+                                try:
+                                    await ch.send(f"**{name}**: {msg}")
+                                except Exception as e:
+                                    log.warning("[chat_bridge] Discord send failed: %s", e)
+
             except asyncio.CancelledError:
                 raise
             except Exception as e:
